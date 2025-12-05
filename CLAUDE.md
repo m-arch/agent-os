@@ -65,15 +65,93 @@ Specialized assistant for code modifications with review flow:
 ## Python Scripts
 
 ### transcript-listener.py
-File watcher that monitors transcript files and routes them to agents:
-- Maintains single-instance lock via `/tmp/transcript-listener.lock`
-- Monitors three transcript files: `main.txt`, `coding.txt`, `capture.txt`
-- Two LLM servers: Text model (port 9090), Vision model (port 9091)
-- Routes inputs to appropriate agent based on file
-- Maintains action logs in JSON format (last 50 entries for context)
+
+Background daemon that watches `/root/transcripts/` for changes and routes content to agents.
+
+**Core Classes:**
+
+- `PersistentAgent` - Manages long-running agent subprocesses with stdin/stdout communication
+  - `start()` - Launch agent binary, start output reader thread
+  - `send(text)` - Send input, wait for response (3-second stability check)
+  - `stop()` - Gracefully terminate with "exit" command
+
+- `AgentManager` - Orchestrates LLM server and multiple agents
+  - `ensure_llm_server(port, model)` - Start/verify llama-server, blocks until healthy
+  - `suspend_llm()` / `resume_llm()` - SIGSTOP/SIGCONT for VRAM management during VL tasks
+  - `send_to_agent(name, text)` - Route to persistent agent, handles `[PROJECT:]` context injection
+  - `send_to_claude(content)` - Route to Claude Code CLI with context persistence
+  - `handle_capture(content)` - Suspend LLM, run VL processing, resume LLM
+
+- `TranscriptWatcher` - File monitoring loop
+  - `check_file(filename)` - Return new content if file modified after startup
+  - `watch()` - Main loop, polls files every 1 second in priority order
+
+**Key Configuration:**
+```python
+TRANSCRIPT_DIR = "/root/transcripts"
+TEXT_MODEL = "~/workspace/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf"
+VL_MODEL = "~/workspace/models/Qwen3-VL-8B-Instruct-Q8_0.gguf"
+TEXT_PORT = 9090
+VL_PORT = 9091
+MAX_LOG_ENTRIES = 50
+```
+
+**Claude Code Integration:**
+- Context persistence via `/root/agent-logs/claude_context.log`
+- Max context: 8000 chars (auto-trims older content)
+- Commands: `reset` (clear context), `compact` (summarize context), `analyse <path>` (generate PROJECT_ANALYSIS.md)
 
 ### transcript-buttons.py
-GUI button interface for transcript interaction with the agents.
+
+GTK3 Layer Shell overlay widget for voice-controlled agent interaction.
+
+**Core Class: `TranscriptButtons`**
+
+- Anchored to right edge of screen using GtkLayerShell
+- Fixed width 390px with scrollable output area
+
+**UI Components:**
+- `btn_main` (red) - General assistant recording
+- `btn_coding` (green) - Code agent with project folder selection via zenity
+- `btn_capture` (blue) - Screenshot + voice capture workflow
+- `btn_claude` (gray/purple) - Toggle Claude Code mode
+- `btn_restart` (⟳) - Kill all processes, respawn widget
+- `text_input` - Direct text input to agents
+- `output_view` - Scrollable log (500 lines max)
+- `sys_label` - CPU/RAM/GPU stats updated every 2 seconds
+
+**Recording Flow:**
+1. `on_button_clicked()` → `start_recording()` - spawns `arecord` subprocess
+2. Click again → `stop_recording()` - SIGINT to arecord
+3. `transcribe_thread()`:
+   - Suspend llama-server (SIGSTOP) to free VRAM
+   - Convert audio: ffmpeg to 16kHz mono
+   - Run whisper-cli with GPU (-ng flag)
+   - Prepend `[CLAUDE]` and/or `[PROJECT: path]` if applicable
+   - Resume llama-server (SIGCONT)
+4. Listener picks up transcript file change
+
+**Capture Flow:**
+1. `start_capture()` → `capture_screenshot_thread()`:
+   - `slurp` for region selection
+   - `grim -g region` saves PNG
+   - Start `arecord` for audio
+2. `stop_capture()` → `process_capture_thread()`:
+   - Suspend llama-server, transcribe with whisper
+   - If Claude mode: send image path + transcript to Claude CLI
+   - If local mode: start VL server (port 9091), send base64 image + prompt
+   - Parse `TARGET: coding/main` from VL response
+   - Write to appropriate transcript file
+
+**Key Functions:**
+- `update_system_stats()` - Reads /proc/stat, /proc/meminfo, nvidia-smi
+- `append_output(text)` - Thread-safe log append via GLib.idle_add
+- `start_listener()` - Spawns transcript-listener.py, captures stdout
+- `read_listener_output()` - Background thread reading listener output
+
+**Dependencies:**
+- gi.repository: Gtk, Gdk, GLib, GtkLayerShell, Pango
+- External: whisper-cli, ffmpeg, arecord, slurp, grim, zenity, nvidia-smi
 
 ## Data Flow
 

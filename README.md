@@ -14,11 +14,20 @@ A C++ AI-powered operating system assistant that bridges local LLMs with OS oper
 
 ## Components
 
+### C++ Binaries
+
 | Binary | Description |
 |--------|-------------|
 | `agent` | Main interactive assistant with file tools and GUI spawning |
 | `agent-view` | WebKit2-based embedded browser for GUI display |
 | `code-agent` | Specialized code review agent with accept/reject workflow |
+
+### Python Scripts
+
+| Script | Description |
+|--------|-------------|
+| `transcript-listener.py` | Background daemon that watches transcript files and routes content to agents |
+| `transcript-buttons.py` | GTK3-based overlay widget with voice recording, transcription, and agent control |
 
 ## Requirements
 
@@ -114,6 +123,71 @@ Compatible with Qwen-based models via llama.cpp:
 User Input → Build Prompt → HTTP POST to llama-server:9090
           → Parse Response → Execute XML Tools → Update History → Loop
 ```
+
+## Python Scripts Detail
+
+### transcript-listener.py
+
+A background daemon that monitors transcript files and routes content to the appropriate AI agents.
+
+**Key Features:**
+- **Single Instance Lock** - Uses `/tmp/transcript-listener.lock` to ensure only one listener runs
+- **File Watching** - Monitors `/root/transcripts/` for changes in `main.txt`, `coding.txt`, and `capture.txt`
+- **Persistent Agents** - Keeps agent processes running for faster response times
+- **LLM Server Management** - Auto-starts llama-server, manages VRAM by suspending/resuming for vision tasks
+- **Context Logging** - Maintains JSON action logs (last 50 entries) for conversation context
+- **Claude Code Integration** - Routes `[CLAUDE]` prefixed messages to Claude Code CLI
+- **Codebase Analysis** - `analyse` command triggers full project analysis with Claude
+
+**Agent Routing:**
+| File | Agent | Purpose |
+|------|-------|---------|
+| `main.txt` | `agent` | General assistant tasks |
+| `coding.txt` | `code-agent` | Code review and modifications |
+| `capture.txt` | VL model | Screenshot + voice analysis |
+
+**Special Commands:**
+- `reset` / `clear` - Clear agent context
+- `resume <text>` - Continue with injected history context
+- `[CLAUDE] <text>` - Route to Claude Code instead of local LLM
+- `analyse <path>` - Generate PROJECT_ANALYSIS.md for codebase
+
+### transcript-buttons.py
+
+A GTK3 Layer Shell overlay widget providing a voice-controlled interface to the agent system.
+
+**Key Features:**
+- **Layer Shell Overlay** - Always-on-top widget anchored to screen edge
+- **Voice Recording** - Records audio via Razer Kiyo or default capture device
+- **Whisper Transcription** - Uses whisper.cpp with GPU acceleration (large-v3 model)
+- **System Monitor** - Real-time CPU, RAM, and GPU/VRAM usage display
+- **Output Log** - Scrollable view of agent responses
+- **Text Input** - Type messages directly to agents
+- **Claude Toggle** - Switch between local LLM and Claude Code
+
+**Buttons:**
+| Button | Function |
+|--------|----------|
+| Main (Red) | Record voice → transcribe → send to main agent |
+| Coding (Green) | Select project folder → record → send to code-agent |
+| Capture (Blue) | Screenshot selection → record voice → VL model analysis |
+| Clau$e (Gray/Purple) | Toggle Claude Code mode on/off |
+| ⟳ | Restart entire system (kills processes, respawns widget) |
+
+**Capture Workflow:**
+1. Click Capture → select screen region with slurp
+2. Screenshot saved, audio recording starts
+3. Click again to stop recording
+4. Whisper transcribes audio
+5. VL model or Claude analyzes screenshot + transcript
+6. Response routed to appropriate agent
+
+**Dependencies:**
+- GTK3 + GtkLayerShell (Wayland overlay support)
+- whisper.cpp with CUDA support
+- ffmpeg (audio conversion)
+- slurp + grim (Wayland screenshot tools)
+- nvidia-smi (GPU monitoring)
 
 ## License
 
