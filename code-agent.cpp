@@ -196,6 +196,35 @@ std::string list_directory(const std::string& path) {
     return result;
 }
 
+std::string run_command(const std::string& cmd) {
+    // Security: Only allow commands that operate within workspace
+    // Check for dangerous patterns
+    if (cmd.find("rm -rf") != std::string::npos ||
+        cmd.find("sudo") != std::string::npos ||
+        cmd.find("chmod") != std::string::npos ||
+        cmd.find("chown") != std::string::npos ||
+        cmd.find("dd ") != std::string::npos ||
+        cmd.find("> /") != std::string::npos) {
+        return "[Error: Command not allowed for security reasons]";
+    }
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "[Error: Cannot execute command]";
+
+    std::string result;
+    char buffer[256];
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        result += buffer;
+    }
+    pclose(pipe);
+
+    // Limit output size
+    if (result.size() > 8000) {
+        result = result.substr(0, 8000) + "\n[Output truncated...]";
+    }
+    return result;
+}
+
 // ============== DIFF ==============
 struct Change {
     std::string file;
@@ -339,39 +368,97 @@ bool apply_change(const Change& change) {
 }
 
 // ============== MAIN ==============
-const char* SYSTEM_PROMPT = R"(You are a coding assistant working in /root/workspace directory.
+const char* SYSTEM_PROMPT = R"(You are an expert coding assistant working in /root/workspace directory.
 
-TOOLS:
-<list>/root/workspace/path</list>  - List directory
-<read>/root/workspace/path/file</read>  - Read file
+## TOOLS AVAILABLE
 
-EDIT EXISTING FILE (must read first):
+<list>/root/workspace/path</list>  - List directory contents
+<read>/root/workspace/path/file</read>  - Read file contents
+<run>shell command</run>  - Execute shell command (use for find, grep, tree, etc.)
+
+## EDIT EXISTING FILE (must read first):
 <change file="/root/workspace/path/file">
 <description>what this does</description>
 <old>exact text from file</old>
 <new>replacement text</new>
 </change>
 
-CREATE NEW FILE (old must be empty):
+## CREATE NEW FILE (old must be empty):
 <change file="/root/workspace/path/newfile">
 <description>creating new file</description>
 <old></old>
 <new>file contents here</new>
 </change>
 
-CRITICAL RULES:
+## CRITICAL RULES
 1. ALWAYS <list> first to find what exists
 2. ALWAYS <read> before editing - copy exact text into <old>
-3. For NEW files: <old></old> MUST be empty (no content between tags)
+3. For NEW files: <old></old> MUST be empty
 4. For EDITS: <old> must contain exact text copied from <read> output
 5. NEVER guess paths - only use paths confirmed via <list>
 6. If file not found, report what IS available
 
-WORKFLOW:
-1. <list>/root/workspace</list> - see projects
-2. <list>/root/workspace/project</list> - explore
-3. <read>/root/workspace/project/file</read> - before any edit
-4. <change> with exact <old> from step 3
+## CODEBASE ANALYSIS PROTOCOL
+
+When asked to "analyze", "understand", or "examine" a codebase, follow this SYSTEMATIC approach:
+
+### PHASE 1: Discovery (Structure Scan)
+1. <run>find PROJECT_PATH -type f -name "*.md" 2>/dev/null | head -20</run>
+2. <run>find PROJECT_PATH -name "package.json" -o -name "Makefile" -o -name "CMakeLists.txt" -o -name "Cargo.toml" -o -name "requirements.txt" -o -name "pyproject.toml" -o -name "go.mod" 2>/dev/null</run>
+3. <run>find PROJECT_PATH -type f \( -name "*.cpp" -o -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" -o -name "*.java" -o -name "*.c" -o -name "*.h" \) 2>/dev/null | head -50</run>
+4. <list>PROJECT_PATH</list>
+
+### PHASE 2: Dependency Mapping
+For EACH source file found:
+1. <read>file</read>
+2. Extract and document:
+   - Import/include statements
+   - Exported functions/classes
+   - Internal vs external dependencies
+   - File purpose and responsibilities
+
+### PHASE 3: Architecture Understanding
+Identify and document:
+- Entry points (main functions, index files)
+- Core modules and responsibilities
+- Data flow between components
+- Configuration files and purpose
+- Build system details
+
+### PHASE 4: Generate ANALYSIS.md
+Create comprehensive analysis report with:
+- Project overview and purpose
+- Technology stack
+- Directory structure with annotations
+- Each component: file, purpose, key functions, dependencies
+- Dependency graph showing file relationships
+- Entry points and how to run
+- Build instructions
+- Key patterns and architectural notes
+
+IMPORTANT: Read EVERY source file systematically. Do not skip files.
+Track all imports to map dependencies. Be thorough and complete.
+)";
+
+// Analyze prompt template - %s gets replaced with project path
+const char* ANALYZE_PROMPT_TEMPLATE = R"(ANALYSIS MODE ACTIVATED
+
+Systematically analyze the codebase at: %s
+
+Execute this analysis protocol step by step:
+
+STEP 1 - DISCOVERY: Run these commands to map the project structure:
+<run>find %s -type f -name "*.md" 2>/dev/null</run>
+<run>find %s \( -name "package.json" -o -name "Makefile" -o -name "CMakeLists.txt" -o -name "Cargo.toml" -o -name "requirements.txt" -o -name "go.mod" \) 2>/dev/null</run>
+<run>find %s -type f \( -name "*.cpp" -o -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.h" -o -name "*.c" -o -name "*.rs" \) 2>/dev/null</run>
+
+STEP 2 - READ BUILD FILES: Read any package.json, Makefile, etc. found
+STEP 3 - READ DOCUMENTATION: Read README.md, CLAUDE.md if present
+STEP 4 - READ EACH SOURCE FILE: Go through each source file systematically
+STEP 5 - MAP DEPENDENCIES: Note which files import/include which
+STEP 6 - GENERATE REPORT: Create %s/ANALYSIS.md with complete analysis
+
+Begin with Step 1 discovery now.
 )";
 
 int main(int argc, char* argv[]) {
@@ -387,9 +474,10 @@ int main(int argc, char* argv[]) {
     std::cout << "╚═══════════════════════════════════════╝\n";
     std::cout << RESET;
     std::cout << "Commands:\n";
-    std::cout << "  " << YELLOW << "/file <path>" << RESET << "  - Load file into context\n";
-    std::cout << "  " << YELLOW << "/clear" << RESET << "        - Clear context\n";
-    std::cout << "  " << YELLOW << "/exit" << RESET << "         - Quit\n\n";
+    std::cout << "  " << YELLOW << "/analyze <path>" << RESET << " - Systematic codebase analysis\n";
+    std::cout << "  " << YELLOW << "/file <path>" << RESET << "    - Load file into context\n";
+    std::cout << "  " << YELLOW << "/clear" << RESET << "          - Clear context\n";
+    std::cout << "  " << YELLOW << "/exit" << RESET << "           - Quit\n\n";
     
     while (true) {
         std::cout << BOLD << GREEN << ">>> " << RESET;
@@ -412,7 +500,7 @@ int main(int argc, char* argv[]) {
             if (input.substr(0, 5) == "/file") {
                 std::string path = input.substr(6);
                 while (!path.empty() && path[0] == ' ') path.erase(0, 1);
-                
+
                 std::string content = read_file(path);
                 if (content.empty()) {
                     std::cout << RED << "Cannot read: " << path << RESET << "\n";
@@ -422,7 +510,154 @@ int main(int argc, char* argv[]) {
                 }
                 continue;
             }
-            
+
+            if (input.substr(0, 8) == "/analyze") {
+                std::string path = input.substr(8);
+                while (!path.empty() && path[0] == ' ') path.erase(0, 1);
+
+                if (path.empty()) {
+                    std::cout << RED << "Usage: /analyze <path>" << RESET << "\n";
+                    continue;
+                }
+
+                // Check path exists
+                if (!is_in_workspace(path)) {
+                    std::cout << RED << "Path must be in /root/workspace" << RESET << "\n";
+                    continue;
+                }
+
+                std::cout << BOLD << CYAN << "\n═══════════════════════════════════════\n";
+                std::cout << "  ANALYZING: " << path << "\n";
+                std::cout << "═══════════════════════════════════════\n" << RESET;
+
+                // Clear context for fresh analysis
+                context.clear();
+                history.clear();
+
+                // Format the analyze prompt with the path
+                char analyze_prompt[4096];
+                snprintf(analyze_prompt, sizeof(analyze_prompt), ANALYZE_PROMPT_TEMPLATE,
+                         path.c_str(), path.c_str(), path.c_str(), path.c_str(), path.c_str());
+
+                // Multi-turn analysis loop
+                std::string analysis_history;
+                int max_turns = 20;  // Limit iterations
+                bool analysis_complete = false;
+
+                for (int turn = 0; turn < max_turns && !analysis_complete; turn++) {
+                    std::string prompt;
+                    if (turn == 0) {
+                        prompt = std::string(SYSTEM_PROMPT) + "\n\n" + analyze_prompt + "\nAssistant:";
+                    } else {
+                        prompt = std::string(SYSTEM_PROMPT) + "\n\n";
+                        if (!context.empty()) {
+                            prompt += "Files read so far:\n" + context + "\n\n";
+                        }
+                        prompt += analysis_history + "\nContinue the analysis. Read more files or generate the final ANALYSIS.md report.\nAssistant:";
+                    }
+
+                    std::cout << BLUE << "[Turn " << (turn + 1) << " - Analyzing...]" << RESET << "\n";
+                    std::string response = query_llm(prompt);
+
+                    // Process all tools in response
+                    std::string tool_results;
+                    size_t pos = 0;
+
+                    // Process all <run> commands
+                    while ((pos = response.find("<run>", pos)) != std::string::npos) {
+                        size_t end = response.find("</run>", pos);
+                        if (end == std::string::npos) break;
+                        std::string cmd = response.substr(pos + 5, end - pos - 5);
+                        std::cout << CYAN << "[Running: " << cmd << "]" << RESET << "\n";
+                        std::string output = run_command(cmd);
+                        std::cout << output << "\n";
+                        tool_results += "Command: " + cmd + "\nOutput:\n" + output + "\n";
+                        pos = end + 6;
+                    }
+
+                    // Process all <list> commands
+                    pos = 0;
+                    while ((pos = response.find("<list>", pos)) != std::string::npos) {
+                        size_t end = response.find("</list>", pos);
+                        if (end == std::string::npos) break;
+                        std::string list_path = response.substr(pos + 6, end - pos - 6);
+                        std::cout << CYAN << "[Listing: " << list_path << "]" << RESET << "\n";
+                        std::string listing = list_directory(list_path);
+                        std::cout << listing << "\n";
+                        tool_results += "Directory: " + list_path + "\n" + listing + "\n";
+                        pos = end + 7;
+                    }
+
+                    // Process all <read> commands
+                    pos = 0;
+                    while ((pos = response.find("<read>", pos)) != std::string::npos) {
+                        size_t end = response.find("</read>", pos);
+                        if (end == std::string::npos) break;
+                        std::string read_path = response.substr(pos + 6, end - pos - 6);
+                        std::cout << CYAN << "[Reading: " << read_path << "]" << RESET << "\n";
+                        std::string file_content = read_file(read_path);
+                        if (!file_content.empty() && file_content.find("[Error") != 0) {
+                            context += "\n--- " + read_path + " ---\n" + file_content + "\n";
+                            std::cout << GREEN << "Loaded: " << read_path << " (" << file_content.size() << " bytes)" << RESET << "\n";
+                            tool_results += "Read file: " + read_path + "\n";
+                        } else {
+                            std::cout << RED << "Cannot read: " << read_path << RESET << "\n";
+                        }
+                        pos = end + 7;
+                    }
+
+                    // Process <change> for ANALYSIS.md creation
+                    std::vector<Change> changes = parse_changes(response);
+                    for (const auto& change : changes) {
+                        if (change.file.find("ANALYSIS.md") != std::string::npos) {
+                            std::cout << BOLD << GREEN << "\n[Creating ANALYSIS.md]" << RESET << "\n";
+                            if (apply_change(change)) {
+                                std::cout << GREEN << "✓ ANALYSIS.md created successfully!" << RESET << "\n";
+                                analysis_complete = true;
+                            } else {
+                                std::cout << RED << "✗ Failed to create ANALYSIS.md" << RESET << "\n";
+                            }
+                        } else {
+                            show_diff(change);
+                            if (apply_change(change)) {
+                                std::cout << GREEN << "✓ Applied" << RESET << "\n";
+                            }
+                        }
+                    }
+
+                    // Add to history
+                    analysis_history += "Assistant: " + response + "\n";
+                    if (!tool_results.empty()) {
+                        analysis_history += "Tool Results:\n" + tool_results + "\n";
+                    }
+
+                    // Trim history if needed
+                    if (analysis_history.length() > 6000) {
+                        analysis_history = analysis_history.substr(analysis_history.length() - 4000);
+                    }
+
+                    // Check if analysis looks complete
+                    if (changes.empty() && tool_results.empty()) {
+                        std::cout << response << "\n";
+                        // If no tools used, might need to prompt for continuation
+                        if (response.find("ANALYSIS.md") != std::string::npos ||
+                            response.find("complete") != std::string::npos ||
+                            response.find("finished") != std::string::npos) {
+                            analysis_complete = true;
+                        }
+                    }
+                }
+
+                if (analysis_complete) {
+                    std::cout << BOLD << GREEN << "\n═══════════════════════════════════════\n";
+                    std::cout << "  ANALYSIS COMPLETE\n";
+                    std::cout << "═══════════════════════════════════════\n" << RESET;
+                } else {
+                    std::cout << YELLOW << "\nAnalysis reached turn limit. Check results.\n" << RESET;
+                }
+                continue;
+            }
+
             std::cout << RED << "Unknown command" << RESET << "\n";
             continue;
         }
@@ -437,37 +672,52 @@ int main(int argc, char* argv[]) {
         std::cout << BLUE << "[Thinking...]" << RESET << "\n";
         std::string response = query_llm(prompt);
 
-        // Process <list> and <read> tools
+        // Process tools in response
         std::string tool_output;
         size_t pos;
 
-        // Process <list>path</list>
-        if ((pos = response.find("<list>")) != std::string::npos) {
-            size_t end = response.find("</list>", pos);
-            if (end != std::string::npos) {
-                std::string path = response.substr(pos + 6, end - pos - 6);
-                std::cout << CYAN << "[Listing: " << path << "]" << RESET << "\n";
-                std::string listing = list_directory(path);
-                std::cout << listing << "\n";
-                tool_output += "Directory listing of " + path + ":\n" + listing + "\n";
-            }
+        // Process all <run> commands
+        pos = 0;
+        while ((pos = response.find("<run>", pos)) != std::string::npos) {
+            size_t end = response.find("</run>", pos);
+            if (end == std::string::npos) break;
+            std::string cmd = response.substr(pos + 5, end - pos - 5);
+            std::cout << CYAN << "[Running: " << cmd << "]" << RESET << "\n";
+            std::string output = run_command(cmd);
+            std::cout << output << "\n";
+            tool_output += "Command: " + cmd + "\nOutput:\n" + output + "\n";
+            pos = end + 6;
         }
 
-        // Process <read>path</read>
-        if ((pos = response.find("<read>")) != std::string::npos) {
+        // Process all <list> commands
+        pos = 0;
+        while ((pos = response.find("<list>", pos)) != std::string::npos) {
+            size_t end = response.find("</list>", pos);
+            if (end == std::string::npos) break;
+            std::string list_path = response.substr(pos + 6, end - pos - 6);
+            std::cout << CYAN << "[Listing: " << list_path << "]" << RESET << "\n";
+            std::string listing = list_directory(list_path);
+            std::cout << listing << "\n";
+            tool_output += "Directory listing of " + list_path + ":\n" + listing + "\n";
+            pos = end + 7;
+        }
+
+        // Process all <read> commands
+        pos = 0;
+        while ((pos = response.find("<read>", pos)) != std::string::npos) {
             size_t end = response.find("</read>", pos);
-            if (end != std::string::npos) {
-                std::string path = response.substr(pos + 6, end - pos - 6);
-                std::cout << CYAN << "[Reading: " << path << "]" << RESET << "\n";
-                std::string content = read_file(path);
-                if (!content.empty() && content.find("[Error") != 0) {
-                    context += "\n--- " + path + " ---\n" + content + "\n";
-                    std::cout << GREEN << "Loaded: " << path << " (" << content.size() << " bytes)" << RESET << "\n";
-                    tool_output += "File content added to context: " + path + "\n";
-                } else {
-                    std::cout << RED << "Cannot read: " << path << RESET << "\n";
-                }
+            if (end == std::string::npos) break;
+            std::string read_path = response.substr(pos + 6, end - pos - 6);
+            std::cout << CYAN << "[Reading: " << read_path << "]" << RESET << "\n";
+            std::string file_content = read_file(read_path);
+            if (!file_content.empty() && file_content.find("[Error") != 0) {
+                context += "\n--- " + read_path + " ---\n" + file_content + "\n";
+                std::cout << GREEN << "Loaded: " << read_path << " (" << file_content.size() << " bytes)" << RESET << "\n";
+                tool_output += "File content added to context: " + read_path + "\n";
+            } else {
+                std::cout << RED << "Cannot read: " << read_path << RESET << "\n";
             }
+            pos = end + 7;
         }
 
         // Parse changes
