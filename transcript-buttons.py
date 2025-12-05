@@ -3,7 +3,7 @@
 import gi
 gi.require_version('Gtk', '3.0')
 gi.require_version('GtkLayerShell', '0.1')
-from gi.repository import Gtk, Gdk, GLib, GtkLayerShell
+from gi.repository import Gtk, Gdk, GLib, GtkLayerShell, Pango
 import subprocess
 import os
 import signal
@@ -82,34 +82,40 @@ class TranscriptButtons(Gtk.Window):
 
     def _setup_css(self):
         """Load CSS before widgets are created"""
-        css = Gtk.CssProvider()
-        css.load_from_data(b'''
-            textview {
-                background: #1a1a1a;
+        self._global_css = Gtk.CssProvider()
+        self._global_css.load_from_data(b'''
+            textview, textview text {
+                background-color: #1a1a1a;
                 color: #00ff00;
                 font-family: monospace;
-                font-size: 9px;
-            }
-            textview text {
-                background: #1a1a1a;
-                color: #00ff00;
+                font-size: 9pt;
             }
             scrolledwindow {
-                background: #1a1a1a;
+                background-color: #1a1a1a;
+            }
+            scrolledwindow undershoot.top,
+            scrolledwindow undershoot.bottom,
+            scrolledwindow overshoot.top,
+            scrolledwindow overshoot.bottom {
+                background: none;
             }
             entry {
-                background: #2a2a2a;
+                background-color: #2a2a2a;
                 color: #ffffff;
                 border: 1px solid #444444;
+                min-height: 24px;
             }
             window {
-                background: #333333;
+                background-color: #333333;
+            }
+            label {
+                font-size: 9pt;
             }
         ''')
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
-            css,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            self._global_css,
+            Gtk.STYLE_PROVIDER_PRIORITY_USER + 100
         )
 
     def _setup_ui(self):
@@ -147,8 +153,9 @@ class TranscriptButtons(Gtk.Window):
             "claude_off": "#666666",  # Gray when Claude disabled
         }
 
-        # Main container
+        # Main container with fixed width
         main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        main_box.set_size_request(390, -1)  # Fixed width to prevent resizing
         main_box.set_margin_start(4)
         main_box.set_margin_end(4)
         main_box.set_margin_top(4)
@@ -199,10 +206,14 @@ class TranscriptButtons(Gtk.Window):
         self.output_view.set_editable(False)
         self.output_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         self.output_view.set_cursor_visible(False)
+        self.output_view.set_monospace(True)
+        # Set font directly to ensure it doesn't change
+        font_desc = Pango.FontDescription("monospace 9")
+        self.output_view.override_font(font_desc)
 
         self.output_scroll = Gtk.ScrolledWindow()
-        self.output_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.output_scroll.set_min_content_width(350)
+        self.output_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        self.output_scroll.set_size_request(380, -1)  # Fixed width
         self.output_scroll.add(self.output_view)
         main_box.pack_start(self.output_scroll, True, True, 0)  # expand=True to fill vertical space
 
