@@ -64,6 +64,9 @@ class TranscriptButtons(Gtk.Window):
     def __init__(self):
         super().__init__()
 
+        # Load CSS FIRST before any widgets are created
+        self._setup_css()
+
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
         GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
@@ -74,7 +77,11 @@ class TranscriptButtons(Gtk.Window):
         GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, 10)
         GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
 
-        # CSS for text view
+        # Setup UI after CSS and layer shell are ready
+        self._setup_ui()
+
+    def _setup_css(self):
+        """Load CSS before widgets are created"""
         css = Gtk.CssProvider()
         css.load_from_data(b'''
             textview {
@@ -90,13 +97,23 @@ class TranscriptButtons(Gtk.Window):
             scrolledwindow {
                 background: #1a1a1a;
             }
+            entry {
+                background: #2a2a2a;
+                color: #ffffff;
+                border: 1px solid #444444;
+            }
+            window {
+                background: #333333;
+            }
         ''')
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(),
             css,
-            Gtk.STYLE_PROVIDER_PRIORITY_USER
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
+    def _setup_ui(self):
+        """Setup all UI widgets after CSS is loaded"""
         os.makedirs(TRANSCRIPT_DIR, exist_ok=True)
 
         # State tracking
