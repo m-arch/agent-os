@@ -10,7 +10,7 @@ import signal
 import threading
 
 WHISPER_CLI = "/root/workspace/whisper.cpp/build/bin/whisper-cli"
-MODEL = "/root/workspace/whisper.cpp/models/ggml-large-v3.bin"
+MODEL = "/root/workspace/whisper.cpp/models/ggml-small.bin"
 TRANSCRIPT_DIR = "/root/transcripts"
 
 def get_audio_device():

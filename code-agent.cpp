@@ -146,7 +146,15 @@ std::string read_file(const std::string& path) {
     if (!file.is_open()) return "";
     std::stringstream buffer;
     buffer << file.rdbuf();
-    return buffer.str();
+    std::string content = buffer.str();
+
+    // Limit file content to prevent context overflow
+    const size_t MAX_FILE_SIZE = 4000;
+    if (content.size() > MAX_FILE_SIZE) {
+        content = content.substr(0, MAX_FILE_SIZE) + "\n[... truncated, " +
+                  std::to_string(content.size() - MAX_FILE_SIZE) + " more bytes ...]";
+    }
+    return content;
 }
 
 bool create_parent_dirs(const std::string& path) {
@@ -368,97 +376,37 @@ bool apply_change(const Change& change) {
 }
 
 // ============== MAIN ==============
-const char* SYSTEM_PROMPT = R"(You are an expert coding assistant working in /root/workspace directory.
+const char* SYSTEM_PROMPT = R"(Expert coding assistant. Workspace: /root/workspace
 
-## TOOLS AVAILABLE
+TOOLS:
+<list>path</list> - List dir
+<read>path</read> - Read file
+<run>cmd</run> - Shell command
 
-<list>/root/workspace/path</list>  - List directory contents
-<read>/root/workspace/path/file</read>  - Read file contents
-<run>shell command</run>  - Execute shell command (use for find, grep, tree, etc.)
-
-## EDIT EXISTING FILE (must read first):
-<change file="/root/workspace/path/file">
-<description>what this does</description>
-<old>exact text from file</old>
-<new>replacement text</new>
+EDIT (read first):
+<change file="path">
+<description>what</description>
+<old>exact text</old>
+<new>new text</new>
 </change>
 
-## CREATE NEW FILE (old must be empty):
-<change file="/root/workspace/path/newfile">
-<description>creating new file</description>
+NEW FILE:
+<change file="path">
+<description>new</description>
 <old></old>
-<new>file contents here</new>
+<new>content</new>
 </change>
 
-## CRITICAL RULES
-1. ALWAYS <list> first to find what exists
-2. ALWAYS <read> before editing - copy exact text into <old>
-3. For NEW files: <old></old> MUST be empty
-4. For EDITS: <old> must contain exact text copied from <read> output
-5. NEVER guess paths - only use paths confirmed via <list>
-6. If file not found, report what IS available
-
-## CODEBASE ANALYSIS PROTOCOL
-
-When asked to "analyze", "understand", or "examine" a codebase, follow this SYSTEMATIC approach:
-
-### PHASE 1: Discovery (Structure Scan)
-1. <run>find PROJECT_PATH -type f -name "*.md" 2>/dev/null | head -20</run>
-2. <run>find PROJECT_PATH -name "package.json" -o -name "Makefile" -o -name "CMakeLists.txt" -o -name "Cargo.toml" -o -name "requirements.txt" -o -name "pyproject.toml" -o -name "go.mod" 2>/dev/null</run>
-3. <run>find PROJECT_PATH -type f \( -name "*.cpp" -o -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.rs" -o -name "*.java" -o -name "*.c" -o -name "*.h" \) 2>/dev/null | head -50</run>
-4. <list>PROJECT_PATH</list>
-
-### PHASE 2: Dependency Mapping
-For EACH source file found:
-1. <read>file</read>
-2. Extract and document:
-   - Import/include statements
-   - Exported functions/classes
-   - Internal vs external dependencies
-   - File purpose and responsibilities
-
-### PHASE 3: Architecture Understanding
-Identify and document:
-- Entry points (main functions, index files)
-- Core modules and responsibilities
-- Data flow between components
-- Configuration files and purpose
-- Build system details
-
-### PHASE 4: Generate ANALYSIS.md
-Create comprehensive analysis report with:
-- Project overview and purpose
-- Technology stack
-- Directory structure with annotations
-- Each component: file, purpose, key functions, dependencies
-- Dependency graph showing file relationships
-- Entry points and how to run
-- Build instructions
-- Key patterns and architectural notes
-
-IMPORTANT: Read EVERY source file systematically. Do not skip files.
-Track all imports to map dependencies. Be thorough and complete.
+RULES: List before read, read before edit. Exact text in <old>.
 )";
 
 // Analyze prompt template - %s gets replaced with project path
-const char* ANALYZE_PROMPT_TEMPLATE = R"(ANALYSIS MODE ACTIVATED
+const char* ANALYZE_PROMPT_TEMPLATE = R"(Analyze codebase at: %s
 
-Systematically analyze the codebase at: %s
-
-Execute this analysis protocol step by step:
-
-STEP 1 - DISCOVERY: Run these commands to map the project structure:
-<run>find %s -type f -name "*.md" 2>/dev/null</run>
-<run>find %s \( -name "package.json" -o -name "Makefile" -o -name "CMakeLists.txt" -o -name "Cargo.toml" -o -name "requirements.txt" -o -name "go.mod" \) 2>/dev/null</run>
-<run>find %s -type f \( -name "*.cpp" -o -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.go" -o -name "*.h" -o -name "*.c" -o -name "*.rs" \) 2>/dev/null</run>
-
-STEP 2 - READ BUILD FILES: Read any package.json, Makefile, etc. found
-STEP 3 - READ DOCUMENTATION: Read README.md, CLAUDE.md if present
-STEP 4 - READ EACH SOURCE FILE: Go through each source file systematically
-STEP 5 - MAP DEPENDENCIES: Note which files import/include which
-STEP 6 - GENERATE REPORT: Create %s/ANALYSIS.md with complete analysis
-
-Begin with Step 1 discovery now.
+1. <run>find %s -type f \( -name "*.cpp" -o -name "*.py" -o -name "*.js" -o -name "*.h" \) 2>/dev/null</run>
+2. <list>%s</list>
+3. Read each file, note imports
+4. Create %s/ANALYSIS.md with: overview, files, dependencies, architecture
 )";
 
 int main(int argc, char* argv[]) {
@@ -537,7 +485,7 @@ int main(int argc, char* argv[]) {
                 // Format the analyze prompt with the path
                 char analyze_prompt[4096];
                 snprintf(analyze_prompt, sizeof(analyze_prompt), ANALYZE_PROMPT_TEMPLATE,
-                         path.c_str(), path.c_str(), path.c_str(), path.c_str(), path.c_str());
+                         path.c_str(), path.c_str(), path.c_str(), path.c_str());
 
                 // Multi-turn analysis loop
                 std::string analysis_history;
@@ -631,9 +579,9 @@ int main(int argc, char* argv[]) {
                         analysis_history += "Tool Results:\n" + tool_results + "\n";
                     }
 
-                    // Trim history if needed
-                    if (analysis_history.length() > 6000) {
-                        analysis_history = analysis_history.substr(analysis_history.length() - 4000);
+                    // Trim history aggressively to stay under context limit
+                    if (analysis_history.length() > 3000) {
+                        analysis_history = analysis_history.substr(analysis_history.length() - 2000);
                     }
 
                     // Check if analysis looks complete
@@ -748,9 +696,14 @@ int main(int argc, char* argv[]) {
         
         history += "User: " + input + "\nAssistant: [made code changes]\n";
         
-        // Trim history
-        if (history.length() > 4000) {
-            history = history.substr(history.length() - 3000);
+        // Trim history to stay under context limit
+        if (history.length() > 2000) {
+            history = history.substr(history.length() - 1500);
+        }
+
+        // Trim context as well
+        if (context.length() > 4000) {
+            context = context.substr(context.length() - 3000);
         }
     }
     

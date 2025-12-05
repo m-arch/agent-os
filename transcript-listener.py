@@ -38,7 +38,7 @@ CODING_LOG = f"{LOG_DIR}/coding-history.json"
 MAX_LOG_ENTRIES = 50  # Keep last N entries for context
 
 # LLM server configs
-TEXT_MODEL = os.path.expanduser("~/workspace/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf")
+TEXT_MODEL = os.path.expanduser("~/workspace/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf")
 VL_MODEL = os.path.expanduser("~/workspace/models/Qwen3-VL-8B-Instruct-Q8_0.gguf")  # Vision model
 TEXT_PORT = 9090
 VL_PORT = 9091
@@ -78,13 +78,74 @@ def save_log(log_path, entries):
     with open(log_path, 'w') as f:
         json.dump(entries, f, indent=2)
 
+def strip_ansi_codes(text):
+    """Remove ANSI escape codes from text"""
+    import re
+    ansi_pattern = re.compile(r'\x1b\[[0-9;]*m|\x1b\[[0-9;]*[A-Za-z]|\033\[[0-9;]*m')
+    return ansi_pattern.sub('', text)
+
+def is_error_only_response(response):
+    """Check if response is just an error message with no useful content"""
+    if not response:
+        return True
+    cleaned = strip_ansi_codes(response).strip().lower()
+    error_patterns = [
+        "unknown command",
+        "error:",
+        "[error",
+        "cannot read",
+        "cannot write",
+        "path outside workspace",
+    ]
+    # If response is short and mostly just an error, skip it
+    if len(cleaned) < 100:
+        for pattern in error_patterns:
+            if pattern in cleaned and cleaned.count('\n') < 3:
+                return True
+    return False
+
 def add_log_entry(log_path, request, response):
-    """Add a new entry to the log"""
+    """Add a new entry to the log with deduplication and cleaning"""
+    # Skip error-only responses
+    if is_error_only_response(response):
+        print(f"[*] Skipping log entry - error-only response")
+        return
+
+    # Clean the response - strip ANSI codes
+    clean_response = strip_ansi_codes(response) if response else ""
+
+    # Truncate response (keep useful portion)
+    if len(clean_response) > 500:
+        clean_response = clean_response[:500] + "..."
+
+    # Load existing entries
     entries = load_log(log_path)
+
+    # Deduplication: check if same request was logged in the last 5 seconds
+    if entries:
+        last_entry = entries[-1]
+        last_request = last_entry.get("request", "")
+        last_timestamp = last_entry.get("timestamp", "")
+
+        # Compare requests (normalize whitespace)
+        request_normalized = ' '.join(request.split())
+        last_normalized = ' '.join(last_request.split())
+
+        if request_normalized == last_normalized:
+            try:
+                last_time = datetime.fromisoformat(last_timestamp)
+                now = datetime.now()
+                time_diff = (now - last_time).total_seconds()
+                if time_diff < 5:  # Within 5 seconds = duplicate
+                    print(f"[*] Skipping duplicate log entry ({time_diff:.1f}s apart)")
+                    return
+            except:
+                pass
+
     entries.append({
         "timestamp": datetime.now().isoformat(),
-        "request": request,
-        "response": response[:500] if response else ""
+        "request": request.strip(),
+        "response": clean_response
     })
     save_log(log_path, entries)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 
 # Start LLM server
-llama-server -m ~/downloads/Qwen3-Coder-30B-A3B-Instruct-Q3_K_M.gguf -ngl 99 -c 8192 --port 9090 > /dev/null 2>&1 &
+llama-server -m ~/downloads/Qwen3-Coder-30B-A3B-Instruct-Q3_K_M.gguf -ngl 99 -c 68192 --port 9090 > /dev/null 2>&1 &
 LLM_PID=$!
 
 # Wait for server
