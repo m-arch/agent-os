@@ -4,20 +4,12 @@
 #include <cstdlib>
 #include <fstream>
 #include <ctime>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 
 // Globals for console
 GtkWidget* console_view;
 GtkTextBuffer* console_buffer;
 bool console_visible = false;
 GtkWidget* console_scroll;
-
-// Globals for agent input
-GtkWidget* input_entry;
-GtkWidget* input_box;
-const char* AGENT_FIFO = "/tmp/agent-input-fifo";
 
 void log_history(const char* url, const char* title) {
     std::ofstream file(std::string(getenv("HOME")) + "/.agent_history", std::ios::app);
@@ -54,36 +46,6 @@ static void on_toggle_console(GtkWidget* btn, gpointer data) {
         gtk_widget_hide(console_scroll);
     }
 }
-
-// Send text to the active agent via FIFO
-static void on_send_input(GtkWidget* btn, gpointer data) {
-    const char* text = gtk_entry_get_text(GTK_ENTRY(input_entry));
-    if (text && strlen(text) > 0) {
-        int fd = open(AGENT_FIFO, O_WRONLY | O_NONBLOCK);
-        if (fd >= 0) {
-            write(fd, text, strlen(text));
-            write(fd, "\n", 1);
-            close(fd);
-            gtk_entry_set_text(GTK_ENTRY(input_entry), "");
-        } else {
-            // Show error in console
-            GtkTextIter end;
-            gtk_text_buffer_get_end_iter(console_buffer, &end);
-            gtk_text_buffer_insert(console_buffer, &end, "[No agent listening]\n", -1);
-        }
-    }
-}
-
-// Handle Enter key in input field
-static gboolean on_input_key_press(GtkWidget* widget, GdkEventKey* event, gpointer data) {
-    if (event->keyval == GDK_KEY_Return || event->keyval == GDK_KEY_KP_Enter) {
-        on_send_input(NULL, NULL);
-        return TRUE;
-    }
-    return FALSE;
-}
-
-
 
 // Handle navigation policy - intercept new window requests
 static gboolean on_decide_policy(WebKitWebView* webview,
@@ -131,7 +93,7 @@ int main(int argc, char* argv[]) {
     // Persistent storage
     std::string data_dir = std::string(getenv("HOME")) + "/.agent_browser";
     std::string cache_dir = data_dir + "/cache";
-    
+
     WebKitWebsiteDataManager* data_manager = webkit_website_data_manager_new(
         "base-data-directory", data_dir.c_str(),
         "base-cache-directory", cache_dir.c_str(),
@@ -139,7 +101,7 @@ int main(int argc, char* argv[]) {
     );
 
     WebKitWebContext* context = webkit_web_context_new_with_website_data_manager(data_manager);
-    
+
     // Cookies
     WebKitCookieManager* cookie_manager = webkit_web_context_get_cookie_manager(context);
     std::string cookie_file = data_dir + "/cookies.sqlite";
@@ -167,7 +129,7 @@ int main(int argc, char* argv[]) {
     GtkWidget* back_btn = gtk_button_new_with_label("←");
     GtkWidget* forward_btn = gtk_button_new_with_label("→");
     GtkWidget* console_btn = gtk_button_new_with_label("Console");
-    
+
     gtk_box_pack_start(GTK_BOX(toolbar), back_btn, FALSE, FALSE, 5);
     gtk_box_pack_start(GTK_BOX(toolbar), forward_btn, FALSE, FALSE, 5);
     gtk_box_pack_end(GTK_BOX(toolbar), console_btn, FALSE, FALSE, 5);
@@ -177,11 +139,11 @@ int main(int argc, char* argv[]) {
         "web-context", context,
         NULL
     ));
-    
+
     WebKitSettings* settings = webkit_web_view_get_settings(webview);
     webkit_settings_set_hardware_acceleration_policy(settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
     webkit_settings_set_enable_javascript(settings, TRUE);
-    webkit_settings_set_javascript_can_open_windows_automatically(settings, FALSE);  // Prevent window.open crashes
+    webkit_settings_set_javascript_can_open_windows_automatically(settings, FALSE);
     webkit_settings_set_enable_developer_extras(settings, TRUE);
     webkit_settings_set_allow_modal_dialogs(settings, TRUE);
 
@@ -190,37 +152,21 @@ int main(int argc, char* argv[]) {
     // Console panel
     console_scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(console_scroll), 150);
-    
+
     console_view = gtk_text_view_new();
     console_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(console_view));
     gtk_text_view_set_editable(GTK_TEXT_VIEW(console_view), FALSE);
     gtk_text_view_set_monospace(GTK_TEXT_VIEW(console_view), TRUE);
-    
+
     gtk_container_add(GTK_CONTAINER(console_scroll), console_view);
     gtk_box_pack_start(GTK_BOX(vbox), console_scroll, FALSE, FALSE, 0);
     gtk_widget_hide(console_scroll);
-
-    // Input field for sending to agent
-    input_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_pack_start(GTK_BOX(vbox), input_box, FALSE, FALSE, 5);
-
-    input_entry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(input_entry), "Type message to agent...");
-    gtk_box_pack_start(GTK_BOX(input_box), input_entry, TRUE, TRUE, 5);
-
-    GtkWidget* send_btn = gtk_button_new_with_label("Send");
-    gtk_box_pack_start(GTK_BOX(input_box), send_btn, FALSE, FALSE, 5);
-
-    g_signal_connect(send_btn, "clicked", G_CALLBACK(on_send_input), NULL);
-    g_signal_connect(input_entry, "key-press-event", G_CALLBACK(on_input_key_press), NULL);
 
     // Connect signals
     g_signal_connect(back_btn, "clicked", G_CALLBACK(on_back), webview);
     g_signal_connect(forward_btn, "clicked", G_CALLBACK(on_forward), webview);
     g_signal_connect(console_btn, "clicked", G_CALLBACK(on_toggle_console), NULL);
     g_signal_connect(webview, "load-changed", G_CALLBACK(on_load_changed), NULL);
-    // Don't connect "create" signal - it crashes WebKitGTK with WindowFeatures bug
-    // Instead, rely on decide-policy to intercept new window requests
     g_signal_connect(webview, "decide-policy", G_CALLBACK(on_decide_policy), NULL);
     g_signal_connect(webview, "permission-request", G_CALLBACK(on_permission_request), NULL);
 
@@ -243,7 +189,7 @@ int main(int argc, char* argv[]) {
         "    return null;"
         "  };"
         "})();";
-    
+
     WebKitUserScript* user_script = webkit_user_script_new(
         script,
         WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
@@ -251,21 +197,21 @@ int main(int argc, char* argv[]) {
         NULL, NULL
     );
     webkit_user_content_manager_add_script(content_manager, user_script);
-    
+
     // Register console message handler
     webkit_user_content_manager_register_script_message_handler(content_manager, "console");
     g_signal_connect(content_manager, "script-message-received::console",
-        G_CALLBACK(+[](WebKitUserContentManager* manager, 
-                       WebKitJavascriptResult* result, 
+        G_CALLBACK(+[](WebKitUserContentManager* manager,
+                       WebKitJavascriptResult* result,
                        gpointer data) {
             JSCValue* value = webkit_javascript_result_get_js_value(result);
             char* str = jsc_value_to_string(value);
-            
+
             GtkTextIter end;
             gtk_text_buffer_get_end_iter(console_buffer, &end);
             gtk_text_buffer_insert(console_buffer, &end, str, -1);
             gtk_text_buffer_insert(console_buffer, &end, "\n", -1);
-            
+
             g_free(str);
         }), NULL);
 
