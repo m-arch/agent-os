@@ -137,16 +137,12 @@ class TranscriptButtons(Gtk.Window):
         self.capture_screenshot_path = None
         self.capture_audio_path = None
 
-        # Coding folder context
-        self.coding_folder = None
-
         # Claude mode toggle
         self.use_claude = False
 
-        # Button colors
+        # Button colors (unified agent: no separate coding button)
         self.colors = {
             "main": "#ff0000",
-            "coding": "#00ff00",
             "capture": "#0000ff",
             "recording": "#ffff00",
             "claude_on": "#9933ff",   # Purple when Claude enabled
@@ -161,16 +157,15 @@ class TranscriptButtons(Gtk.Window):
         main_box.set_margin_top(4)
         main_box.set_margin_bottom(4)
 
-        # Buttons row
+        # Buttons row - Unified agent: Main handles both OS tasks and coding
+        # User can say "project /path" via voice to set coding context
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
 
-        self.btn_main = Gtk.Button(label="Main")
-        self.btn_coding = Gtk.Button(label="Coding")
+        self.btn_main = Gtk.Button(label="Command")
         self.btn_capture = Gtk.Button(label="Capture")
 
         self.buttons = {
             "main": (self.btn_main, "main.txt", self.colors["main"]),
-            "coding": (self.btn_coding, "coding.txt", self.colors["coding"]),
             "capture": (self.btn_capture, "capture.txt", self.colors["capture"])
         }
 
@@ -524,59 +519,9 @@ class TranscriptButtons(Gtk.Window):
             return
 
         if self.recording_process is None:
-            # For coding button, show folder selection first
-            if name == "coding":
-                self.select_workspace_folder(button, name, filename)
-            else:
-                self.start_recording(button, name, filename)
+            self.start_recording(button, name, filename)
         elif self.current_button == button:
             self.stop_recording()
-
-    def select_workspace_folder(self, button, name, filename):
-        """Show folder selection dialog for coding context"""
-        workspace = "/root/workspace"
-
-        # Get list of folders in workspace
-        try:
-            folders = sorted([f for f in os.listdir(workspace)
-                            if os.path.isdir(os.path.join(workspace, f)) and not f.startswith('.')])
-        except:
-            folders = []
-
-        if not folders:
-            # No folders, just start recording
-            self.coding_folder = None
-            self.start_recording(button, name, filename)
-            return
-
-        # Build zenity list command
-        folder_args = []
-        for f in folders:
-            folder_args.extend([f, f])
-
-        # Run zenity in a thread to not block UI
-        def select_folder():
-            try:
-                result = subprocess.run(
-                    ["zenity", "--list", "--title=Select Project",
-                     "--text=Choose workspace folder for coding context:",
-                     "--column=Folder", "--column=Name",
-                     "--width=400", "--height=300"] + folder_args,
-                    capture_output=True, text=True, timeout=30
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    self.coding_folder = result.stdout.strip().split('|')[0]
-                else:
-                    self.coding_folder = None
-            except:
-                self.coding_folder = None
-
-            # Start recording on main thread
-            GLib.idle_add(lambda: self.start_recording(button, name, filename))
-
-        thread = threading.Thread(target=select_folder)
-        thread.daemon = True
-        thread.start()
 
     def start_capture(self, button):
         """Take screenshot then start recording audio"""
@@ -790,12 +735,14 @@ class TranscriptButtons(Gtk.Window):
             subprocess.run(["pkill", "-f", "llama-server"], stderr=subprocess.DEVNULL)
             time.sleep(2)
 
-            # Start VL server
+            # Start VL server with mmproj for vision support
             VL_PORT = 9091
             VL_MODEL = os.path.expanduser("~/workspace/models/Qwen3-VL-8B-Instruct-Q8_0.gguf")
+            MMPROJ = os.path.expanduser("~/workspace/models/mmproj-Qwen3VL-8B-Instruct-F16.gguf")
 
+            self.log(f"[*] Starting VL server with mmproj...")
             vl_process = subprocess.Popen(
-                ["llama-server", "-m", VL_MODEL, "-ngl", "34", "-c", "4096", "--port", str(VL_PORT)],
+                ["llama-server", "-m", VL_MODEL, "--mmproj", MMPROJ, "-ngl", "99", "-c", "4096", "--port", str(VL_PORT)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 stdin=subprocess.DEVNULL,
@@ -816,42 +763,54 @@ class TranscriptButtons(Gtk.Window):
                 vl_process.terminate()
                 return
 
-            # Analyze with vision model
+            # Analyze with vision model using OpenAI-compatible API
             with open(screenshot_path, "rb") as f:
                 image_data = base64.b64encode(f.read()).decode("utf-8")
 
-            prompt = f"""Look at this screenshot and follow the user's instruction.
+            prompt = """Describe what you see in this image in detail.
+If it's code/terminal: describe the language, visible code, errors, file paths.
+If it's a UI: describe the elements, text, and layout.
+If it's something else: describe what you actually see.
+Be accurate - only describe what is truly visible."""
 
-User instruction: {transcript}
-
-Based on the screenshot and instruction, provide a response.
-At the end, specify the target by writing exactly one of:
-TARGET: coding
-TARGET: main
-
-Use "coding" if the task is about code, programming, or technical work.
-Use "main" for general tasks."""
-
+            # Use OpenAI-compatible chat completions API with base64 data URL
             request_data = {
-                "prompt": f"<|im_start|>user\n<image>\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-                "image_data": [{"data": image_data, "id": 0}],
-                "n_predict": 1024,
-                "temperature": 0.3,
-                "stop": ["<|im_end|>", "<|endoftext|>"]
+                "model": "gpt-4-vision-preview",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{image_data}"
+                                }
+                            },
+                            {
+                                "type": "text",
+                                "text": prompt
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 1024,
+                "temperature": 0.3
             }
 
             req = urllib.request.Request(
-                f"http://localhost:{VL_PORT}/completion",
+                f"http://localhost:{VL_PORT}/v1/chat/completions",
                 data=json.dumps(request_data).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
 
             try:
+                self.log("[*] Waiting for VL response...")
                 with urllib.request.urlopen(req, timeout=180) as response:
                     result = json.loads(response.read().decode("utf-8"))
-                    vl_response = result.get("content", "")
+                    # OpenAI chat completions format
+                    vl_response = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             except Exception as e:
-                self.log(f"[! VL request failed: {e}")
+                self.log(f"[!] VL request failed: {e}")
                 vl_process.terminate()
                 return
 
@@ -860,26 +819,24 @@ Use "main" for general tasks."""
             vl_process.wait()
             time.sleep(1)
 
-            # Parse response for target
-            target = "main"
-            for line in vl_response.split("\n"):
-                if line.strip().upper().startswith("TARGET:"):
-                    t = line.split(":", 1)[1].strip().lower()
-                    if "coding" in t:
-                        target = "coding"
+            # Log the VL model output so user can see it
+            vl_description = vl_response.strip()
+            self.log("=" * 40)
+            self.log("[VL MODEL OUTPUT]")
+            self.log("-" * 40)
+            self.log(vl_description)
+            self.log("-" * 40)
+            self.log(f"[USER COMMAND] {transcript}")
+            self.log("=" * 40)
 
-            # Remove TARGET line from content
-            content_lines = [l for l in vl_response.split("\n") if not l.strip().upper().startswith("TARGET:")]
-            content = "\n".join(content_lines).strip()
+            # Format: [SCREENSHOT] description + user's command
+            content = f"[SCREENSHOT CONTEXT]\n{vl_description}\n[END SCREENSHOT]\n\nUser request: {transcript}"
 
-            # Save to appropriate file
-            if target == "coding":
-                filepath = os.path.join(TRANSCRIPT_DIR, "coding.txt")
-            else:
-                filepath = os.path.join(TRANSCRIPT_DIR, "main.txt")
-
+            filepath = os.path.join(TRANSCRIPT_DIR, "main.txt")
             with open(filepath, "w") as f:
                 f.write(content)
+
+            self.log("[*] Sent to coding agent")
 
         finally:
             # Make sure llama-server is resumed
@@ -930,7 +887,6 @@ Use "main" for general tasks."""
             temp_wav = self.temp_wav
             current_file = self.current_file
             current_name = self.current_name
-            coding_folder = self.coding_folder if current_name == "coding" else None
             use_claude = self.use_claude  # Capture claude mode state
 
             # Reset button color immediately
@@ -942,7 +898,6 @@ Use "main" for general tasks."""
             self.current_name = None
             self.current_file = None
             self.temp_wav = None
-            self.coding_folder = None
 
             # Start transcription in background thread
             self.processing_count += 1
@@ -950,12 +905,12 @@ Use "main" for general tasks."""
 
             thread = threading.Thread(
                 target=self.transcribe_thread,
-                args=(temp_wav, current_file, coding_folder, use_claude)
+                args=(temp_wav, current_file, use_claude)
             )
             thread.daemon = True
             thread.start()
 
-    def transcribe_thread(self, temp_wav, output_file, coding_folder=None, use_claude=False):
+    def transcribe_thread(self, temp_wav, output_file, use_claude=False):
         llama_pids = []
         try:
             if not os.path.exists(temp_wav):
@@ -1005,8 +960,6 @@ Use "main" for general tasks."""
                     prefix = ""
                     if use_claude:
                         prefix += "[CLAUDE] "
-                    if coding_folder:
-                        prefix += f"[PROJECT: /root/workspace/{coding_folder}] "
                     f.write(f"{prefix}{transcript}")
 
             # Cleanup

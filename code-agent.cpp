@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <map>
 #include <cstdlib>
 #include <cstdio>
 #include <unistd.h>
@@ -125,16 +126,55 @@ std::string query_llm(const std::string& prompt) {
 }
 
 // ============== WORKSPACE ==============
-const std::string WORKSPACE = "/root/workspace";
+const std::string DEFAULT_WORKSPACE = "/root/workspace";
+std::string active_project_dir = "";  // Set when [PROJECT: path] is detected
+
+std::string get_effective_workspace() {
+    // If a project directory is set, use it; otherwise use default workspace
+    return active_project_dir.empty() ? DEFAULT_WORKSPACE : active_project_dir;
+}
 
 bool is_in_workspace(const std::string& path) {
+    std::string workspace = get_effective_workspace();
     // Resolve to absolute path and check it's in workspace
     char resolved[PATH_MAX];
     if (realpath(path.c_str(), resolved) != nullptr) {
-        return std::string(resolved).find(WORKSPACE) == 0;
+        return std::string(resolved).find(workspace) == 0;
     }
     // For new files that don't exist yet, check the path directly
-    return path.find(WORKSPACE) == 0;
+    return path.find(workspace) == 0;
+}
+
+// Extract project directory from input if present
+void check_project_context(const std::string& input) {
+    // Look for PROJECT CONTEXT block or [PROJECT: path] tag
+    size_t pos = input.find("CURRENT PROJECT:");
+    if (pos != std::string::npos) {
+        size_t start = pos + 17;  // Length of "CURRENT PROJECT: "
+        size_t end = input.find('\n', start);
+        if (end != std::string::npos) {
+            active_project_dir = input.substr(start, end - start);
+            // Trim whitespace
+            while (!active_project_dir.empty() && active_project_dir.back() == ' ')
+                active_project_dir.pop_back();
+            while (!active_project_dir.empty() && active_project_dir[0] == ' ')
+                active_project_dir.erase(0, 1);
+        }
+    }
+    // Also check for [PROJECT: path] format
+    pos = input.find("[PROJECT:");
+    if (pos != std::string::npos) {
+        size_t start = pos + 9;  // Length of "[PROJECT:"
+        size_t end = input.find(']', start);
+        if (end != std::string::npos) {
+            active_project_dir = input.substr(start, end - start);
+            // Trim whitespace
+            while (!active_project_dir.empty() && active_project_dir.back() == ' ')
+                active_project_dir.pop_back();
+            while (!active_project_dir.empty() && active_project_dir[0] == ' ')
+                active_project_dir.erase(0, 1);
+        }
+    }
 }
 
 // ============== FILE OPS ==============
@@ -204,6 +244,9 @@ std::string list_directory(const std::string& path) {
     return result;
 }
 
+// Track failed commands to prevent loops
+static std::map<std::string, int> failed_commands;
+
 std::string run_command(const std::string& cmd) {
     // Security: Only allow commands that operate within workspace
     // Check for dangerous patterns
@@ -216,7 +259,12 @@ std::string run_command(const std::string& cmd) {
         return "[Error: Command not allowed for security reasons]";
     }
 
-    FILE* pipe = popen(cmd.c_str(), "r");
+    // Check if this command has failed too many times
+    if (failed_commands[cmd] >= 2) {
+        return "[Error: Command failed multiple times, skipping to prevent loop]";
+    }
+
+    FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");  // Capture stderr too
     if (!pipe) return "[Error: Cannot execute command]";
 
     std::string result;
@@ -224,7 +272,14 @@ std::string run_command(const std::string& cmd) {
     while (fgets(buffer, sizeof(buffer), pipe)) {
         result += buffer;
     }
-    pclose(pipe);
+    int status = pclose(pipe);
+
+    // Track failures
+    if (status != 0 || result.find("No such file") != std::string::npos ||
+        result.find("not found") != std::string::npos ||
+        result.find("Error") != std::string::npos) {
+        failed_commands[cmd]++;
+    }
 
     // Limit output size
     if (result.size() > 8000) {
@@ -376,7 +431,7 @@ bool apply_change(const Change& change) {
 }
 
 // ============== MAIN ==============
-const char* SYSTEM_PROMPT = R"(Expert coding assistant. Workspace: /root/workspace
+const char* SYSTEM_PROMPT = R"(Expert coding assistant.
 
 TOOLS:
 <list>path</list> - List dir
@@ -397,7 +452,29 @@ NEW FILE:
 <new>content</new>
 </change>
 
-RULES: List before read, read before edit. Exact text in <old>.
+RULES:
+- List before read, read before edit. Exact text in <old>.
+- IMPORTANT: If a PROJECT CONTEXT is provided, work ONLY within that project directory.
+- Do NOT navigate to parent directories or list files outside the specified project.
+- Stay focused on the current task and project files only.
+
+CRITICAL - NO HALLUCINATION:
+- NEVER assume or invent file names, directory structures, or file contents
+- You MUST use <list>path</list> FIRST to see what actually exists
+- ONLY describe files you have ACTUALLY listed or read with tools
+- If you haven't run <list> or <read>, you don't know what's there
+- WRONG: "The files are: main.py, utils.py" (without listing first)
+- RIGHT: <list>/path/to/project</list> then describe what you see
+- Do NOT assume a project is Python just because you expect it to be
+- Look at ACTUAL file extensions: .js/.ts = JavaScript/TypeScript, .py = Python
+- NEVER run commands like "python main.py" unless you SEE main.py in directory listing
+- If a command fails, do NOT retry it - move on to something else
+
+VOICE INPUT:
+- Commands come via voice transcription, expect typos/phonetic errors
+- Interpret: "forgit" = "forget", "kontekst" = "context", "fil" = "file", etc.
+- "forget context", "reset", "clear" = ignore previous conversation, start fresh
+- Focus on intent, not exact spelling
 )";
 
 // Analyze prompt template - %s gets replaced with project path
@@ -422,9 +499,10 @@ int main(int argc, char* argv[]) {
     std::cout << "╚═══════════════════════════════════════╝\n";
     std::cout << RESET;
     std::cout << "Commands:\n";
+    std::cout << "  " << YELLOW << "/project <path>" << RESET << " - Set/show active project directory\n";
     std::cout << "  " << YELLOW << "/analyze <path>" << RESET << " - Systematic codebase analysis\n";
     std::cout << "  " << YELLOW << "/file <path>" << RESET << "    - Load file into context\n";
-    std::cout << "  " << YELLOW << "/clear" << RESET << "          - Clear context\n";
+    std::cout << "  " << YELLOW << "/clear" << RESET << "          - Clear context (and project)\n";
     std::cout << "  " << YELLOW << "/exit" << RESET << "           - Quit\n\n";
     
     while (true) {
@@ -433,15 +511,96 @@ int main(int argc, char* argv[]) {
         if (!std::getline(std::cin, input)) break;
         
         if (input.empty()) continue;
-        
+
+        // Check for project context in input and set active_project_dir
+        check_project_context(input);
+        if (!active_project_dir.empty()) {
+            std::cout << CYAN << "[Project: " << active_project_dir << "]" << RESET << "\n";
+        }
+
+        // Extract actual user message (skip any injected PROJECT CONTEXT)
+        std::string user_message = input;
+
+        // If input contains PROJECT CONTEXT block, extract the part after it
+        size_t ctx_end = input.find("=== END PROJECT CONTEXT ===");
+        if (ctx_end != std::string::npos) {
+            user_message = input.substr(ctx_end + 27);  // Skip past the marker
+        }
+        // Also try to find message after [PROJECT:...] tag
+        size_t proj_end = input.find("]");
+        if (proj_end != std::string::npos && input.find("[PROJECT:") != std::string::npos) {
+            std::string after_tag = input.substr(proj_end + 1);
+            // If this is shorter, it's probably the actual message
+            if (after_tag.length() < user_message.length()) {
+                user_message = after_tag;
+            }
+        }
+
+        // Trim whitespace
+        while (!user_message.empty() && (user_message[0] == ' ' || user_message[0] == '\n'))
+            user_message.erase(0, 1);
+        while (!user_message.empty() && (user_message.back() == ' ' || user_message.back() == '\n'))
+            user_message.pop_back();
+
+        // Convert to lowercase for comparison
+        std::string msg_lower = user_message;
+        for (auto& c : msg_lower) c = tolower(c);
+
+        // Check for clear commands - be very inclusive
+        bool should_clear = (msg_lower == "forget") ||
+                           (msg_lower == "reset") ||
+                           (msg_lower == "clear") ||
+                           (msg_lower == "clear context") ||
+                           (msg_lower == "forget context") ||
+                           (msg_lower == "reset context") ||
+                           (msg_lower == "forget everything") ||
+                           (msg_lower.find("forget") == 0 && msg_lower.find("context") != std::string::npos) ||
+                           (msg_lower.find("clear") == 0 && msg_lower.find("context") != std::string::npos) ||
+                           (msg_lower.find("reset") == 0 && msg_lower.find("context") != std::string::npos);
+
+        if (should_clear) {
+            context.clear();
+            history.clear();
+            active_project_dir = "";
+            // Clear log files
+            system("rm -f /root/agent-logs/coding-history.json");
+            system("rm -f /root/agent-logs/main-history.json");
+            std::cout << GREEN << "Context and logs cleared." << RESET << "\n";
+            continue;
+        }
+
         // Commands
         if (input[0] == '/') {
             if (input == "/exit" || input == "/quit") break;
-            
+
             if (input == "/clear") {
                 context.clear();
                 history.clear();
-                std::cout << "Context cleared.\n";
+                active_project_dir = "";  // Also clear project context
+                // Clear log files
+                system("rm -f /root/agent-logs/coding-history.json");
+                system("rm -f /root/agent-logs/main-history.json");
+                std::cout << GREEN << "Context and logs cleared." << RESET << "\n";
+                continue;
+            }
+
+            if (input.substr(0, 8) == "/project") {
+                std::string path = input.substr(8);
+                while (!path.empty() && path[0] == ' ') path.erase(0, 1);
+                if (path.empty()) {
+                    if (active_project_dir.empty()) {
+                        std::cout << YELLOW << "No project set. Use: /project <path>" << RESET << "\n";
+                    } else {
+                        std::cout << GREEN << "Current project: " << active_project_dir << RESET << "\n";
+                    }
+                } else {
+                    if (is_in_workspace(path) || path.find("/root/workspace") == 0) {
+                        active_project_dir = path;
+                        std::cout << GREEN << "Project set to: " << active_project_dir << RESET << "\n";
+                    } else {
+                        std::cout << RED << "Project must be in /root/workspace" << RESET << "\n";
+                    }
+                }
                 continue;
             }
             
@@ -670,38 +829,124 @@ int main(int argc, char* argv[]) {
 
         // Parse changes
         std::vector<Change> changes = parse_changes(response);
-        
-        if (changes.empty()) {
-            // No structured changes, just print response
-            std::cout << response << "\n";
-            history += "User: " + input + "\nAssistant: " + response + "\n";
-            continue;
-        }
-        
-        // Auto-apply all changes
-        std::cout << "\n" << BOLD << "Found " << changes.size() << " change(s)" << RESET << "\n";
 
-        for (size_t i = 0; i < changes.size(); i++) {
-            Change& change = changes[i];
-
-            std::cout << BOLD << "\n[" << (i+1) << "/" << changes.size() << "]" << RESET;
-            show_diff(change);
-
-            if (apply_change(change)) {
-                std::cout << GREEN << "✓ Applied" << RESET << "\n";
-            } else {
-                std::cout << RED << "✗ Failed to apply" << RESET << "\n";
+        // Apply any changes
+        if (!changes.empty()) {
+            std::cout << "\n" << BOLD << "Found " << changes.size() << " change(s)" << RESET << "\n";
+            for (size_t i = 0; i < changes.size(); i++) {
+                Change& change = changes[i];
+                std::cout << BOLD << "\n[" << (i+1) << "/" << changes.size() << "]" << RESET;
+                show_diff(change);
+                if (apply_change(change)) {
+                    std::cout << GREEN << "✓ Applied" << RESET << "\n";
+                } else {
+                    std::cout << RED << "✗ Failed to apply" << RESET << "\n";
+                }
             }
         }
-        
-        history += "User: " + input + "\nAssistant: [made code changes]\n";
-        
-        // Trim history to stay under context limit
+
+        // If tools were used, continue with multi-turn loop to let LLM process results
+        if (!tool_output.empty()) {
+            std::string turn_history = "User: " + input + "\nAssistant: " + response + "\nTool Results:\n" + tool_output;
+            int max_turns = 10;
+
+            for (int turn = 0; turn < max_turns; turn++) {
+                // Build continuation prompt
+                std::string cont_prompt = std::string(SYSTEM_PROMPT) + "\n\n";
+                if (!context.empty()) {
+                    cont_prompt += "Current files:\n" + context + "\n\n";
+                }
+                cont_prompt += turn_history + "\nContinue exploring or create the requested output.\nAssistant:";
+
+                std::cout << BLUE << "[Thinking... turn " << (turn + 2) << "]" << RESET << "\n";
+                response = query_llm(cont_prompt);
+
+                // Process tools in this response
+                tool_output.clear();
+                size_t pos;
+
+                // Process <list> commands
+                pos = 0;
+                while ((pos = response.find("<list>", pos)) != std::string::npos) {
+                    size_t end = response.find("</list>", pos);
+                    if (end == std::string::npos) break;
+                    std::string list_path = response.substr(pos + 6, end - pos - 6);
+                    std::cout << CYAN << "[Listing: " << list_path << "]" << RESET << "\n";
+                    std::string listing = list_directory(list_path);
+                    std::cout << listing << "\n";
+                    tool_output += "Directory " + list_path + ":\n" + listing + "\n";
+                    pos = end + 7;
+                }
+
+                // Process <read> commands
+                pos = 0;
+                while ((pos = response.find("<read>", pos)) != std::string::npos) {
+                    size_t end = response.find("</read>", pos);
+                    if (end == std::string::npos) break;
+                    std::string read_path = response.substr(pos + 6, end - pos - 6);
+                    std::cout << CYAN << "[Reading: " << read_path << "]" << RESET << "\n";
+                    std::string file_content = read_file(read_path);
+                    if (!file_content.empty() && file_content.find("[Error") != 0) {
+                        context += "\n--- " + read_path + " ---\n" + file_content + "\n";
+                        std::cout << GREEN << "Loaded: " << read_path << " (" << file_content.size() << " bytes)" << RESET << "\n";
+                        tool_output += "Read: " + read_path + "\n";
+                    }
+                    pos = end + 7;
+                }
+
+                // Process <run> commands
+                pos = 0;
+                while ((pos = response.find("<run>", pos)) != std::string::npos) {
+                    size_t end = response.find("</run>", pos);
+                    if (end == std::string::npos) break;
+                    std::string cmd = response.substr(pos + 5, end - pos - 5);
+                    std::cout << CYAN << "[Running: " << cmd << "]" << RESET << "\n";
+                    std::string output = run_command(cmd);
+                    std::cout << output << "\n";
+                    tool_output += "Command " + cmd + ":\n" + output + "\n";
+                    pos = end + 6;
+                }
+
+                // Process changes
+                changes = parse_changes(response);
+                for (const auto& change : changes) {
+                    show_diff(change);
+                    if (apply_change(change)) {
+                        std::cout << GREEN << "✓ Applied" << RESET << "\n";
+                    }
+                }
+
+                // Update turn history
+                turn_history += "\nAssistant: " + response;
+                if (!tool_output.empty()) {
+                    turn_history += "\nTool Results:\n" + tool_output;
+                }
+
+                // Trim to avoid context overflow
+                if (turn_history.length() > 6000) {
+                    turn_history = turn_history.substr(turn_history.length() - 4000);
+                }
+
+                // Stop if no more tools used (LLM is done exploring)
+                if (tool_output.empty() && changes.empty()) {
+                    std::cout << response << "\n";
+                    break;
+                }
+            }
+
+            history += "User: " + input + "\nAssistant: [explored and processed]\n";
+        } else if (changes.empty()) {
+            // No tools and no changes - just print response
+            std::cout << response << "\n";
+            history += "User: " + input + "\nAssistant: " + response + "\n";
+        } else {
+            history += "User: " + input + "\nAssistant: [made code changes]\n";
+        }
+
+        // Trim history and context
         if (history.length() > 2000) {
             history = history.substr(history.length() - 1500);
         }
-
-        // Trim context as well
         if (context.length() > 4000) {
             context = context.substr(context.length() - 3000);
         }

@@ -12,6 +12,7 @@ import threading
 import json
 import signal
 import fcntl
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -38,12 +39,13 @@ CODING_LOG = f"{LOG_DIR}/coding-history.json"
 MAX_LOG_ENTRIES = 50  # Keep last N entries for context
 
 # LLM server configs
-TEXT_MODEL = os.path.expanduser("~/workspace/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf")
+TEXT_MODEL = os.path.expanduser("~/workspace/models/DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf")
 VL_MODEL = os.path.expanduser("~/workspace/models/Qwen3-VL-8B-Instruct-Q8_0.gguf")  # Vision model
 TEXT_PORT = 9090
 VL_PORT = 9091
 
 # File to agent mapping (ordered: main -> coding -> capture)
+# Now using unified agent for both main and coding - routes to same binary
 FILE_AGENTS = [
     ("main.txt", {
         "name": "agent",
@@ -51,8 +53,8 @@ FILE_AGENTS = [
         "log": MAIN_LOG,
     }),
     ("coding.txt", {
-        "name": "code-agent",
-        "binary": f"{AGENT_OS_DIR}/code-agent",
+        "name": "agent",  # Same agent handles coding too
+        "binary": f"{AGENT_OS_DIR}/agent",
         "log": CODING_LOG,
     }),
     ("capture.txt", {
@@ -173,9 +175,26 @@ class PersistentAgent:
         self.reader_thread = None
         self.lock = threading.Lock()
         self.fresh_start = True  # True when agent just started, needs context
+        self.binary_mtime = None  # Track binary modification time
+
+    def restart(self):
+        """Stop and restart the agent (reloads binary)"""
+        self.stop()
+        time.sleep(0.5)
+        return self.start()
 
     def start(self):
         """Start the agent process"""
+        # Check if binary has been updated
+        try:
+            current_mtime = os.path.getmtime(self.binary)
+            if self.binary_mtime and current_mtime > self.binary_mtime:
+                print(f"[*] Binary {self.binary} updated, restarting {self.name}...")
+                self.stop()
+            self.binary_mtime = current_mtime
+        except:
+            pass
+
         if self.proc and self.proc.poll() is None:
             return True
 
@@ -219,11 +238,23 @@ class PersistentAgent:
         with self.lock:
             self.output_buffer = []
 
-        # Check for special commands
+        # Check for special commands - extract actual message ignoring PROJECT CONTEXT
         text_lower = text.lower().strip()
 
-        # "reset" or "clear" - send clear command to agent and skip processing
-        if text_lower in ["reset", "clear"] or text_lower.startswith("reset ") or text_lower.startswith("clear "):
+        # Extract just the user command (after any PROJECT CONTEXT injection)
+        user_cmd = text_lower
+        if "=== end project context ===" in user_cmd:
+            user_cmd = user_cmd.split("=== end project context ===")[-1].strip()
+        # Also handle [PROJECT:...] prefix
+        if user_cmd.startswith("[project:"):
+            bracket_end = user_cmd.find("]")
+            if bracket_end != -1:
+                user_cmd = user_cmd[bracket_end + 1:].strip()
+
+        # "reset", "clear", "forget" commands - send clear to agent
+        clear_commands = ["reset", "clear", "forget", "clear context", "forget context",
+                         "reset context", "forget everything"]
+        if user_cmd in clear_commands or any(user_cmd.startswith(c + " ") for c in ["reset", "clear", "forget"]):
             try:
                 self.proc.stdin.write("clear\n")
                 self.proc.stdin.flush()
@@ -251,9 +282,16 @@ class PersistentAgent:
         self.fresh_start = False
 
         try:
-            self.proc.stdin.write(text + "\n")
+            # CRITICAL: Collapse multi-line input to single line
+            # The agent reads one line at a time, so newlines would be processed as separate commands
+            text_single_line = text.replace('\n', ' ').replace('\r', ' ')
+            # Remove excessive spaces
+            while '  ' in text_single_line:
+                text_single_line = text_single_line.replace('  ', ' ')
+
+            self.proc.stdin.write(text_single_line + "\n")
             self.proc.stdin.flush()
-            print(f"[>] Sent to {self.name}: {text[:50]}...")
+            print(f"[>] Sent to {self.name}: {text_single_line[:50]}...")
 
             # Wait for response (look for completion indicators)
             # Agent prints output then waits for next input
@@ -334,7 +372,7 @@ class AgentManager:
         print(f"[*] Starting LLM server on port {port}...")
         self.llm_server = subprocess.Popen(
             ["llama-server", "-m", model,
-             "-ngl", "34", "-c", "8192", "--port", str(port)],
+             "-ngl", "20", "-c", "12288", "--port", str(port)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
@@ -377,42 +415,30 @@ class AgentManager:
         # Clean input - ensure single line
         text_clean = text.replace('\n', ' ').strip()
 
-        # For code-agent: if PROJECT specified, include directory tree and key file contents
-        if agent_name == "code-agent" and "[PROJECT:" in text_clean:
-            import re
+        # Check for context clear commands BEFORE adding project context
+        # Extract the actual user message (after [PROJECT:...] tag if present)
+        user_msg = re.sub(r'\[PROJECT:\s*[^\]]+\]\s*', '', text_clean).strip().lower()
+        if user_msg in ['forget', 'reset', 'clear', 'forget context', 'clear context',
+                        'reset context', 'forget everything']:
+            # Send directly without project context injection
+            agent = self.persistent_agents.get(agent_name)
+            if agent:
+                agent.send(user_msg)
+                print(f"[*] Sent clear command to {agent_name}")
+            return
+
+        # If PROJECT specified, add it as a prefix for the unified agent
+        # The agent will use this for coding tasks in that directory
+        if "[PROJECT:" in text_clean:
             match = re.search(r'\[PROJECT:\s*([^\]]+)\]', text_clean)
             if match:
                 project_path = match.group(1).strip()
-                files = []
-                try:
-                    # Get recursive file listing (max depth 3)
-                    result = subprocess.run(
-                        ["find", project_path, "-maxdepth", "3", "-type", "f",
-                         "(", "-name", "*.js", "-o", "-name", "*.ts", "-o", "-name", "*.py",
-                         "-o", "-name", "*.cpp", "-o", "-name", "*.md", "-o", "-name", "*.json", ")"],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    if result.stdout.strip():
-                        files = result.stdout.strip().split('\n')[:30]  # Limit to 30 files
-                        file_list = '\n'.join(files)
-                        text_clean = f"{text_clean}\n\nFILES IN PROJECT:\n{file_list}"
-                        print(f"[*] Injected {len(files)} file paths into prompt")
+                # Extract just the user's request (after the [PROJECT:...] tag)
+                user_request = re.sub(r'\[PROJECT:\s*[^\]]+\]\s*', '', text_clean).strip()
 
-                    # Auto-read key files and inject content
-                    key_files = ['CLAUDE.md', 'README.md', 'package.json']
-                    for key_file in key_files:
-                        for f in files:
-                            if f.endswith(f'/{key_file}') or f.endswith(f'/{key_file}'.lower()):
-                                try:
-                                    with open(f, 'r') as fh:
-                                        content = fh.read()[:2000]  # Limit to 2000 chars
-                                    text_clean = f"{text_clean}\n\n=== {f} ===\n{content}"
-                                    print(f"[*] Injected content from {key_file}")
-                                    break
-                                except:
-                                    pass
-                except Exception as e:
-                    print(f"[!] Failed to list project files: {e}")
+                # Simple, clean format - no multi-line blocks, no file injection
+                text_clean = f"[PROJECT: {project_path}] {user_request}"
+                print(f"[*] Project context: {project_path}")
 
         # Get or create persistent agent
         agent = self.persistent_agents.get(agent_name)

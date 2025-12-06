@@ -9,8 +9,10 @@ A C++ AI-powered operating system assistant that bridges local LLMs with OS oper
 - **Command Execution** - Run shell commands through the AI assistant
 - **GUI Generation** - AI can create and display HTML-based interfaces
 - **Web Browsing** - Built-in WebKit-based browser component
-- **Code Review Agent** - Specialized assistant for code modifications with diff visualization
+- **Unified Agent** - Single agent handles both OS tasks and coding with auto-mode switching
+- **Diff Visualization** - Code changes shown with colored diff output
 - **Local LLM** - Runs entirely on local models via llama.cpp (no cloud dependencies)
+- **Voice Input** - Speech-to-text via whisper.cpp with typo tolerance
 
 ## Components
 
@@ -18,9 +20,8 @@ A C++ AI-powered operating system assistant that bridges local LLMs with OS oper
 
 | Binary | Description |
 |--------|-------------|
-| `agent` | Main interactive assistant with file tools and GUI spawning |
+| `agent` | Unified AI assistant for OS operations and coding tasks |
 | `agent-view` | WebKit2-based embedded browser for GUI display |
-| `code-agent` | Specialized code review agent with accept/reject workflow |
 
 ### Python Scripts
 
@@ -142,12 +143,12 @@ A background daemon that monitors transcript files and routes content to the app
 **Agent Routing:**
 | File | Agent | Purpose |
 |------|-------|---------|
-| `main.txt` | `agent` | General assistant tasks |
-| `coding.txt` | `code-agent` | Code review and modifications |
+| `main.txt` | `agent` | Unified agent for all tasks (OS + coding) |
 | `capture.txt` | VL model | Screenshot + voice analysis |
 
 **Special Commands:**
-- `reset` / `clear` - Clear agent context
+- `reset` / `clear` / `forget` - Clear agent context
+- `project /path` - Set working directory for coding tasks
 - `resume <text>` - Continue with injected history context
 - `[CLAUDE] <text>` - Route to Claude Code instead of local LLM
 - `analyse <path>` - Generate PROJECT_ANALYSIS.md for codebase
@@ -168,11 +169,13 @@ A GTK3 Layer Shell overlay widget providing a voice-controlled interface to the 
 **Buttons:**
 | Button | Function |
 |--------|----------|
-| Main (Red) | Record voice → transcribe → send to main agent |
-| Coding (Green) | Select project folder → record → send to code-agent |
+| Main (Red) | Record voice → transcribe → send to unified agent |
 | Capture (Blue) | Screenshot selection → record voice → VL model analysis |
 | Clau$e (Gray/Purple) | Toggle Claude Code mode on/off |
 | ⟳ | Restart entire system (kills processes, respawns widget) |
+
+**Setting Project Context:**
+Instead of a dedicated coding button, say "project /path/to/folder" via voice to set the working directory for coding tasks. The unified agent handles both OS operations and code modifications.
 
 **Capture Workflow:**
 1. Click Capture → select screen region with slurp

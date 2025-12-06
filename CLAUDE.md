@@ -9,10 +9,9 @@ Agent OS is a C++ AI-powered operating system assistant that bridges local LLMs 
 ## Build Commands
 
 ```bash
-make all          # Compile all binaries (agent, agent-view, code-agent)
-make agent        # Compile main agent binary only
+make all          # Compile all binaries (agent, agent-view)
+make agent        # Compile unified agent binary only
 make agent-view   # Compile GUI viewer only
-make code-agent   # Compile code review agent only
 make install      # Install binaries to /usr/local/bin/
 make clean        # Remove compiled binaries
 ```
@@ -24,16 +23,15 @@ Build uses g++ with C++17, -O2 optimization, and links against libcurl, GTK3, an
 ```bash
 ./start-agent.sh    # Start llama-server + agent (full stack)
 ./agent             # Run agent directly (requires llama-server on port 9090)
-./code-agent        # Run code review agent (requires llama-server on port 9090)
 ./agent-view <url>  # Launch browser component with URL
 ```
 
 ## Architecture
 
-Three executables with distinct responsibilities:
+Two executables:
 
 ### agent (agent.cpp)
-Main interactive assistant with comprehensive system integration:
+Unified AI assistant handling both OS operations and coding tasks:
 - REPL interface with LLM communication via HTTP POST to localhost:9090/completion
 - XML-based tool system:
   - `<read path="..."/>` - Read file contents
@@ -42,9 +40,14 @@ Main interactive assistant with comprehensive system integration:
   - `<run>command</run>` - Execute shell commands
   - `<gui>html</gui>` - Display GUI content via agent-view
   - `<url>web_address</url>` - Open URLs in browser
-- Conversation history with sliding window (max 8000 chars, trims at 6000)
-- Spawns agent-view as subprocess for GUI display
-- Configuration: MAX_TOKENS = 4096, TEMPERATURE = 0.7
+  - `<delete path="..."/>` - Delete with confirmation dialog
+  - `<change file="...">` - Code changes with diff visualization
+- Multi-turn tool processing loop (up to 10 turns)
+- Project context support via `project /path` command or `[PROJECT: /path]` prefix
+- Voice input tolerance (typo correction from speech-to-text)
+- Context reset via `clear`, `reset`, or `forget` commands
+- Colored terminal output for diffs and status
+- Configuration: MAX_TOKENS = 4096, TEMPERATURE = 0.5
 
 ### agent-view (agent-view.cpp)
 WebKit2-based embedded browser for GUI display:
@@ -53,14 +56,6 @@ WebKit2-based embedded browser for GUI display:
 - History logging to ~/.agent_history
 - Hardware acceleration disabled for stability
 - GTK3 + WebKit2GTK integration
-
-### code-agent (code-agent.cpp)
-Specialized assistant for code modifications with review flow:
-- Structured `<change>` block parsing with diff visualization
-- Interactive accept/reject/edit workflow per change
-- Lower temperature (0.3) for precise code generation
-- Shorter context window (max 4000 chars, trims at 3000)
-- Colored diff output for visual clarity
 
 ## Python Scripts
 
@@ -89,7 +84,7 @@ Background daemon that watches `/root/transcripts/` for changes and routes conte
 **Key Configuration:**
 ```python
 TRANSCRIPT_DIR = "/root/transcripts"
-TEXT_MODEL = "~/workspace/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf"
+TEXT_MODEL = "~/workspace/models/DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf"
 VL_MODEL = "~/workspace/models/Qwen3-VL-8B-Instruct-Q8_0.gguf"
 TEXT_PORT = 9090
 VL_PORT = 9091
@@ -111,8 +106,7 @@ GTK3 Layer Shell overlay widget for voice-controlled agent interaction.
 - Fixed width 390px with scrollable output area
 
 **UI Components:**
-- `btn_main` (red) - General assistant recording
-- `btn_coding` (green) - Code agent with project folder selection via zenity
+- `btn_main` (red) - Unified agent recording (handles both OS and coding tasks)
 - `btn_capture` (blue) - Screenshot + voice capture workflow
 - `btn_claude` (gray/purple) - Toggle Claude Code mode
 - `btn_restart` (⟳) - Kill all processes, respawn widget
@@ -127,7 +121,7 @@ GTK3 Layer Shell overlay widget for voice-controlled agent interaction.
    - Suspend llama-server (SIGSTOP) to free VRAM
    - Convert audio: ffmpeg to 16kHz mono
    - Run whisper-cli with GPU (-ng flag)
-   - Prepend `[CLAUDE]` and/or `[PROJECT: path]` if applicable
+   - Prepend `[CLAUDE]` if Claude mode enabled
    - Resume llama-server (SIGCONT)
 4. Listener picks up transcript file change
 
@@ -140,8 +134,7 @@ GTK3 Layer Shell overlay widget for voice-controlled agent interaction.
    - Suspend llama-server, transcribe with whisper
    - If Claude mode: send image path + transcript to Claude CLI
    - If local mode: start VL server (port 9091), send base64 image + prompt
-   - Parse `TARGET: coding/main` from VL response
-   - Write to appropriate transcript file
+   - Write response to main.txt (unified agent handles all tasks)
 
 **Key Functions:**
 - `update_system_stats()` - Reads /proc/stat, /proc/meminfo, nvidia-smi
@@ -151,7 +144,7 @@ GTK3 Layer Shell overlay widget for voice-controlled agent interaction.
 
 **Dependencies:**
 - gi.repository: Gtk, Gdk, GLib, GtkLayerShell, Pango
-- External: whisper-cli, ffmpeg, arecord, slurp, grim, zenity, nvidia-smi
+- External: whisper-cli, ffmpeg, arecord, slurp, grim, nvidia-smi
 
 ## Data Flow
 
@@ -174,23 +167,23 @@ All agents communicate with llama-cpp-server:
 **agent.cpp:**
 - `query_llm()` - HTTP communication with LLM server
 - `process_tools()` - Parse and execute XML tool tags from response
-- `show_gui()` - Create temp HTML file and spawn agent-view
-
-**code-agent.cpp:**
-- `parse_changes()` - Extract change blocks from LLM response
+- `parse_changes()` - Extract `<change>` blocks from LLM response
 - `show_diff()` - Display colored before/after comparison
 - `apply_change()` - Apply validated changes to files
+- `show_gui()` - Create temp HTML file and spawn agent-view
+- `check_project_context()` - Parse `[PROJECT: /path]` prefix
 
 ## Dependencies
 
-Build: g++ (C++17), make, pkg-config, libcurl-dev, libgtk-3-dev, libwebkit2gtk-4.0-dev
+Build: g++ (C++17), make, pkg-config, libcurl-dev, libreadline-dev, libgtk-3-dev, libwebkit2gtk-4.0-dev
 
-Runtime: GTK3, WebKit2GTK, libcurl, llama-cpp-server (llama.cpp)
+Runtime: GTK3, WebKit2GTK, libcurl, libreadline, llama-cpp-server (llama.cpp)
 
 ## Available Models
 
 Located in /root/workspace/models/:
-- qwen2.5-coder-14b-instruct-q4_k_m.gguf (9GB) - Main text model
+- DeepSeek-Coder-V2-Lite-Instruct-Q5_K_M.gguf - Current default text model
+- qwen2.5-coder-14b-instruct-q4_k_m.gguf (9GB) - Alternative text model
 - qwen2.5-coder-7b-instruct-q4_k_m.gguf (4.7GB) - Smaller text model
 - Qwen3-Coder-30B-A3B-Instruct-Q3_K_M.gguf (14.7GB) - Large coder model
 - Qwen3-VL-8B-Instruct-Q8_0.gguf (8.7GB) - Vision language model
