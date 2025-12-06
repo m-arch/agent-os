@@ -324,6 +324,17 @@ void open_url(const std::string& url) {
     }
 }
 
+// Type text at cursor position using wtype
+void type_at_cursor(const std::string& text) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Small delay to let user focus on target window
+        usleep(100000);  // 100ms
+        execlp("wtype", "wtype", text.c_str(), nullptr);
+        exit(1);
+    }
+}
+
 // ============== DIFF DISPLAY ==============
 struct Change {
     std::string file;
@@ -571,6 +582,16 @@ std::string process_tools(const std::string& response, std::string& context) {
         }
     }
 
+    // Process <type>text</type> - types text at cursor position
+    if (response.find("<type>") != std::string::npos) {
+        std::string text = extract_tag_content(response, "type");
+        if (!text.empty()) {
+            std::cout << CYAN << "[Typing at cursor...]" << RESET << "\n";
+            type_at_cursor(text);
+            result += "[Typed text at cursor]\n";
+        }
+    }
+
     // Process <change> blocks
     std::vector<Change> changes = parse_changes(response);
     for (const auto& change : changes) {
@@ -601,6 +622,7 @@ IMPORTANT: Output XML tags EXACTLY as shown. Do NOT use function calling syntax.
 <delete path="/path"/>         - Delete (with confirmation)
 <gui>html content</gui>        - Show HTML interface
 <url>https://...</url>         - Open URL in browser
+<type>text to type</type>      - Type text at cursor position
 
 ## Code Changes (for multi-line edits):
 <change file="/path">
